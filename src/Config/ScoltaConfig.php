@@ -447,7 +447,9 @@ class ScoltaConfig
      * search local. Emitted top-level by toBrowserConfig() after
      * normalizedFederatedSources().
      *
-     * @var array<int, array{label?: string, url?: string, weight?: float|int|string}>
+     * Entries arrive from CMS config storage unvalidated, hence mixed.
+     *
+     * @var array<int, mixed>
      * @since 2.0.0
      * @stability experimental
      */
@@ -1000,6 +1002,10 @@ class ScoltaConfig
             }
             $label = is_string($source['label'] ?? null) ? trim($source['label']) : '';
             $weight = is_numeric($source['weight'] ?? null) ? (float) $source['weight'] : 1.0;
+            // INF would make json_encode() fail for the whole page config.
+            if (!is_finite($weight)) {
+                $weight = 1.0;
+            }
             $normalized[] = [
                 'label' => $label !== '' ? $label : $host,
                 'url' => $url,

@@ -204,6 +204,18 @@ describe('federated sources', () => {
         expect(urls).not.toContain('https://docs.example.com/node/1');
     });
 
+    test('this site and repeated entries are not searched as remotes', async () => {
+        const { mock, created } = createMockPagefind({});
+        const window = await boot(mock, [
+            { label: 'Self', url: 'http://www.example.com/pagefind/pagefind.js' },
+            { label: 'Docs', url: DOCS + 'pagefind.js' },
+            { label: 'Docs again', url: DOCS + 'pagefind.js?v=2' },
+        ], { [DOCS]: entry('1.5.0', ['en']) });
+
+        expect(created.map(c => c.opts.basePath)).toEqual([DOCS]);
+        expect(shownUrls(window).filter(u => u === '/local-page')).toHaveLength(1);
+    });
+
     test('no sources configured creates no instances', async () => {
         const { mock, created } = createMockPagefind({});
         const window = await boot(mock, [], {});
