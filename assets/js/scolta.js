@@ -16,6 +16,9 @@
  *   siteName: 'My Site'                    — Display name for the site
  *   container: '#scolta-search'            — CSS selector for the search container
  *   allowedLinkDomains: []                 — Domains allowed in summary links (empty = all)
+ *   federatedSources: []                   — Optional: other sites' bundles searched alongside this
+ *                                            one, as [{ label, url, weight }], url naming the remote's
+ *                                            pagefind.js. Each remote must allow this origin via CORS.
  *   disclaimer: ''                         — Disclaimer text below AI summary (empty = none)
  *   labels: {}                             — Optional: per-site overrides for user-facing UI strings.
  *                                            Rendered as text (HTML-escaped). Keys and defaults:
@@ -1373,6 +1376,7 @@
   // Load one remote, or return null when it cannot be searched on this page.
   async function loadFederatedSource(source, localVersion, lang) {
     let remote = null;
+    let abandoned = false;
     let label = source.url;
     try {
       const base = source.url.replace(/pagefind\.js(\?.*)?$/, '');
@@ -1392,6 +1396,8 @@
         // this one's search, so a remote without it is skipped, not substituted.
         const langEntry = (entry.languages || {})[lang];
         if (!langEntry) throw new Error('no "' + lang + '" index');
+        // Timed out while the entry was in flight: build nothing nobody will use.
+        if (abandoned) throw new Error('abandoned');
         // noWorker: a SharedWorker must be same-origin, and the remote's is not.
         remote = pagefindInstance.createInstance({
           basePath: base,
@@ -1404,6 +1410,7 @@
         return { label, origin, instance: remote, pageCount: langEntry.page_count || 0 };
       })(), FEDERATED_SOURCE_TIMEOUT_MS, label);
     } catch (e) {
+      abandoned = true;
       console.warn('[scolta] Federated source ' + label + ' skipped: ' + (e && e.message ? e.message : e));
       if (remote && typeof remote.destroy === 'function') {
         Promise.resolve().then(() => remote.destroy()).catch(() => {});
@@ -1493,8 +1500,21 @@
       console.warn('[scolta] Federated sources need Pagefind createInstance(); none loaded');
       return;
     }
+    // A mesh tends to hand every site the same list, this one included, and a
+    // site searched as its own remote shows every local result twice. Skip it,
+    // and any bundle listed more than once.
+    const bundleOf = (url) => {
+      try { return new URL(url.replace(/pagefind\.js(\?.*)?$/, ''), window.location.href).href; } catch (_) { return url; }
+    };
+    const seen = new Set([bundleOf((instanceConfig && instanceConfig.pagefindPath) || '/pagefind/pagefind.js')]);
+    const unique = sources.filter(s => {
+      const b = bundleOf(s.url);
+      if (seen.has(b)) return false;
+      seen.add(b);
+      return true;
+    });
     const loaded = (await Promise.all(
-      sources.map(s => loadFederatedSource(s, localVersion, lang)))).filter(Boolean);
+      unique.map(s => loadFederatedSource(s, localVersion, lang)))).filter(Boolean);
     if (loaded.length === 0 || facetIndexFederated) return;
 
     pagefind = federatedPagefind(pagefind, loaded);
