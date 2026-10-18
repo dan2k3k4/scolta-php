@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tag1\Scolta\Http;
 
+use Psr\Log\LoggerInterface;
 use Tag1\Scolta\Cache\CacheDriverInterface;
 use Tag1\Scolta\Config\ScoltaConfig;
 use Tag1\Scolta\Prompt\PromptEnricherInterface;
@@ -54,6 +55,21 @@ trait AiControllerTrait
     abstract protected function resolveEnricher(): PromptEnricherInterface;
 
     /**
+     * Return the PSR-3 logger the AiEndpointHandler reports provider failures to.
+     *
+     * The handler degrades a failed expansion, summary or follow-up to an
+     * HTTP 200 response and records the underlying exception only through
+     * this logger, so an adapter must hand it a real channel (Drupal:
+     * `$this->getLogger('scolta')`, Laravel: `Log::channel(...)`); a
+     * NullLogger here means provider timeouts, 529s and rejected API keys
+     * leave no trace.
+     *
+     * @since     2.0.0
+     * @stability experimental
+     */
+    abstract protected function resolveLogger(): LoggerInterface;
+
+    /**
      * Decode a JSON request body into the shared result shape.
      *
      * Platform controllers previously hand-rolled identical json_decode +
@@ -102,6 +118,7 @@ trait AiControllerTrait
             cacheTtl: $config->cacheTtl,
             maxFollowUps: $config->maxFollowUps,
             promptEnricher: $this->resolveEnricher(),
+            logger: $this->resolveLogger(),
             aiLanguages: $config->aiLanguages,
             aiExpandQuery: $config->aiExpandQuery,
             aiSummarize: $config->aiSummarize,
