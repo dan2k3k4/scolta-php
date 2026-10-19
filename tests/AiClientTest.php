@@ -586,7 +586,7 @@ class AiClientTest extends TestCase
 
         $client = new AiClient(
             [
-                'provider' => 'anthropic','api_key' => 'key', 'model' => 'claude-sonnet-4-5-20250929'],
+                'provider' => 'anthropic','api_key' => 'key', 'model' => 'claude-sonnet-5-5'],
             new Client(['handler' => HandlerStack::create($mock)]),
         );
 
@@ -649,7 +649,7 @@ class AiClientTest extends TestCase
 
         $client = new AiClient(
             [
-                'provider' => 'anthropic','api_key' => 'key', 'model' => 'claude-sonnet-4-5-20250929'],
+                'provider' => 'anthropic','api_key' => 'key', 'model' => 'claude-sonnet-5-5'],
             new Client(['handler' => HandlerStack::create($mock)]),
         );
 
@@ -775,5 +775,120 @@ class AiClientTest extends TestCase
 
         $request = $container[0]['request'];
         $this->assertEquals('2023-06-01', $request->getHeaderLine('anthropic-version'));
+    }
+
+    // -------------------------------------------------------------------
+    // Effort (output_config.effort)
+    // -------------------------------------------------------------------
+
+    private function anthropicClientWithHistory(array &$history, array $config = []): AiClient
+    {
+        $mock = new MockHandler([
+            new Response(200, [], json_encode([
+                'content' => [['type' => 'text', 'text' => 'ok']],
+            ])),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::history($history));
+
+        return new AiClient(
+            $config + ['provider' => 'anthropic', 'api_key' => 'key'],
+            new Client(['handler' => $stack]),
+        );
+    }
+
+    public function testAnthropicSendsLowEffortByDefault(): void
+    {
+        $history = [];
+        $this->anthropicClientWithHistory($history)->message('sys', 'msg');
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertSame(['effort' => 'low'], $body['output_config']);
+        // Thinking is adaptive on current models and cannot be disabled;
+        // effort is the only control sent.
+        $this->assertArrayNotHasKey('thinking', $body);
+    }
+
+    public function testAnthropicEmptyEffortOmitsOutputConfig(): void
+    {
+        $history = [];
+        $this->anthropicClientWithHistory($history, ['effort' => ''])->message('sys', 'msg');
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertArrayNotHasKey('output_config', $body);
+    }
+
+    public function testEffortIsConfigurableAndNormalized(): void
+    {
+        // A platform setting may carry stray case or whitespace.
+        $history = [];
+        $this->anthropicClientWithHistory($history, ['effort' => " High\t"])->message('sys', 'msg');
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertSame(['effort' => 'high'], $body['output_config']);
+    }
+
+    public function testUnknownEffortFallsBackToDefaultWithWarning(): void
+    {
+        $history = [];
+        $mock = new MockHandler([
+            new Response(200, [], json_encode([
+                'content' => [['type' => 'text', 'text' => 'ok']],
+            ])),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::history($history));
+        $logger = new RecordingLogger();
+
+        $client = new AiClient(
+            ['provider' => 'anthropic', 'api_key' => 'key', 'effort' => 'maximum'],
+            new Client(['handler' => $stack]),
+            $logger,
+        );
+        $client->message('sys', 'msg');
+
+        // AI keeps working on the default level rather than failing at construction.
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertSame(['effort' => AiClient::DEFAULT_EFFORT], $body['output_config']);
+
+        $this->assertCount(1, $logger->records);
+        $this->assertSame('warning', $logger->records[0]['level']);
+        $this->assertSame('maximum', $logger->records[0]['context']['effort']);
+        $this->assertSame('low', $logger->records[0]['context']['default']);
+    }
+
+    public function testOpenAiNeverSendsOutputConfig(): void
+    {
+        $history = [];
+        $mock = new MockHandler([
+            new Response(200, [], json_encode([
+                'choices' => [['message' => ['content' => 'ok']]],
+            ])),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(Middleware::history($history));
+
+        $client = new AiClient(
+            ['provider' => 'openai', 'api_key' => 'key', 'effort' => 'high'],
+            new Client(['handler' => $stack]),
+        );
+        $client->message('sys', 'msg');
+
+        $body = json_decode((string) $history[0]['request']->getBody(), true);
+        $this->assertArrayNotHasKey('output_config', $body);
+    }
+}
+
+/**
+ * Minimal PSR-3 logger that records every call for assertions.
+ */
+final class RecordingLogger extends \Psr\Log\AbstractLogger
+{
+    /** @var list<array{level: string, message: string, context: array}> */
+    public array $records = [];
+
+    public function log($level, string|\Stringable $message, array $context = []): void
+    {
+        $this->records[] = ['level' => (string) $level, 'message' => (string) $message, 'context' => $context];
     }
 }

@@ -8,6 +8,8 @@ use GuzzleHttp\Client;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\ClientException;
 use GuzzleHttp\Exception\GuzzleException;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Tag1\Scolta\AiProvider\ModelIdentity;
 use Tag1\Scolta\Exception\ApiKeyInvalidException;
 use Tag1\Scolta\Exception\ApiKeyMissingException;
@@ -35,7 +37,25 @@ class AiClient
      * @since 1.0.4
      * @stability experimental
      */
-    public const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
+    public const DEFAULT_MODEL = 'claude-sonnet-5-5';
+
+    /**
+     * Default reasoning effort sent to Anthropic as `output_config.effort`.
+     *
+     * Current Anthropic models (Sonnet 5.5, Haiku 5.5 and later) run adaptive
+     * thinking by default, and at the default effort they spend seconds
+     * reasoning before a search summary or query expansion that needs none.
+     * `low` keeps the response fast. A site can raise it through the `effort`
+     * config key, or send an empty string to omit the field for a model that
+     * predates it.
+     *
+     * @since 2.0.0
+     * @stability experimental
+     */
+    public const DEFAULT_EFFORT = 'low';
+
+    /** Effort levels Anthropic accepts, lowest to highest. */
+    private const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
     private const SUPPORTED_PROVIDERS = ['anthropic', 'openai'];
 
@@ -51,6 +71,8 @@ class AiClient
     private string $baseUrl;
     private string $apiVersion;
     private int $timeout;
+    private string $effort;
+    private LoggerInterface $logger;
 
     /**
      * Whether requests go to the provider's own API rather than a proxy.
@@ -68,14 +90,25 @@ class AiClient
      * @param array $config Configuration array with keys:
      *   - provider: 'anthropic' or 'openai' (required; there is no default)
      *   - api_key: API key (required)
-     *   - model: Model identifier (default: 'claude-sonnet-4-5-20250929')
+     *   - model: Model identifier (default: AiClient::DEFAULT_MODEL)
      *   - base_url: Override API base URL (optional)
      *   - api_version: Anthropic API version (default: '2023-06-01')
      *   - timeout: HTTP request timeout in seconds (default: 30)
+     *   - effort: Anthropic reasoning effort, one of low|medium|high|xhigh|max
+     *     (default: AiClient::DEFAULT_EFFORT). Case and surrounding whitespace
+     *     are ignored. An empty string omits the field; needed for models older
+     *     than Opus 4.5, which reject it. An unrecognised value falls back to
+     *     the default with a warning rather than disabling AI. Ignored by the
+     *     OpenAI path.
      * @param ClientInterface|null $httpClient Optional Guzzle client override.
+     * @param LoggerInterface|null $logger PSR-3 logger for config warnings
+     *   (defaults to NullLogger).
      */
-    public function __construct(array $config, ?ClientInterface $httpClient = null)
-    {
+    public function __construct(
+        array $config,
+        ?ClientInterface $httpClient = null,
+        ?LoggerInterface $logger = null,
+    ) {
         // No default. An absent or empty provider is "nobody selected one", and
         // the check below turns that into an error rather than into Anthropic:
         // a client must never be built on an assumption about which vendor the
@@ -101,6 +134,24 @@ class AiClient
         $this->model = $config['model'] ?? self::DEFAULT_MODEL;
         $this->apiVersion = $config['api_version'] ?? self::ANTHROPIC_API_VERSION;
         $this->timeout = (int) ($config['timeout'] ?? 30);
+        $this->logger = $logger ?? new NullLogger();
+        // A platform setting arrives as whatever an operator or an env var
+        // holds, so tolerate case and whitespace. An unknown level falls back
+        // to the default rather than throwing: this setting did not exist
+        // before, and a typo in it must not take every AI feature down.
+        $effort = strtolower(trim((string) ($config['effort'] ?? self::DEFAULT_EFFORT)));
+        if ($effort !== '' && !in_array($effort, self::EFFORT_LEVELS, true)) {
+            $this->logger->warning(
+                "Unsupported AI effort '{effort}'; using '{default}'. Supported levels: {levels}, or an empty string to omit it.",
+                [
+                    'effort' => $effort,
+                    'default' => self::DEFAULT_EFFORT,
+                    'levels' => implode(', ', self::EFFORT_LEVELS),
+                ],
+            );
+            $effort = self::DEFAULT_EFFORT;
+        }
+        $this->effort = $effort;
         // Recorded before the OpenAI path rewrites $baseUrl below, which would
         // otherwise make an unset base_url indistinguishable from a configured
         // one.
@@ -272,6 +323,13 @@ class AiClient
         // Omit temperature entirely when null so the provider default applies.
         if ($temperature !== null) {
             $body['temperature'] = $temperature;
+        }
+        // Current Anthropic models think by default; `low` keeps a summary or
+        // expansion from spending seconds reasoning first. No `thinking` block
+        // is sent: on the 5.x models thinking is adaptive and cannot be
+        // disabled, and effort is the supported control.
+        if ($this->effort !== '') {
+            $body['output_config'] = ['effort' => $this->effort];
         }
 
         $response = $this->httpClient->request('POST', $this->baseUrl, [
